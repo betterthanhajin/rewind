@@ -1,9 +1,60 @@
 (() => {
-  console.log("[Rewind] content script loaded");
+  console.log("[Rewind] v0.4 loaded");
 
-  /**
-   * 현재 화면에 렌더링된 사용자 메시지 찾기
-   */
+  const STORAGE_PREFIX = "rewind:conversation:";
+  const PENDING_JUMP_KEY = "rewind:pending-jump";
+
+  const sleep = (ms) =>
+    new Promise((resolve) => {
+      window.setTimeout(resolve, ms);
+    });
+
+  const getConversationId = () => {
+    return location.pathname;
+  };
+
+  const getConversationKey = () => {
+    return `${STORAGE_PREFIX}${getConversationId()}`;
+  };
+
+  const getConversationTitle = () => {
+    const title = document.title
+      .replace(/\s*[-|]\s*ChatGPT.*$/i, "")
+      .trim();
+
+    return title || "Untitled conversation";
+  };
+
+  const getConversationUrl = () => {
+    return `${location.origin}${location.pathname}`;
+  };
+
+  const hashString = (value) => {
+    let hash = 0;
+
+    for (let i = 0; i < value.length; i++) {
+      hash =
+        (hash << 5) -
+        hash +
+        value.charCodeAt(i);
+
+      hash |= 0;
+    }
+
+    return Math.abs(hash).toString(36);
+  };
+
+  const getScrollContainer = () => {
+    return (
+      document.querySelector(
+        '[data-app-action="timeline-scroll"]'
+      ) ||
+      document.querySelector(
+        ".thread-scroll-container"
+      )
+    );
+  };
+
   const findUserMessages = () => {
     return Array.from(
       document.querySelectorAll(
@@ -12,21 +63,19 @@
     );
   };
 
-  /**
-   * 사용자 메시지가 속한 전체 conversation turn 찾기
-   */
   const getTurnElement = (bubble) => {
     return (
       bubble.closest("[data-turn-key]") ||
-      bubble.closest("[data-content-search-turn-key]") ||
-      bubble.closest("[data-chatgpt-search-unit-key]") ||
+      bubble.closest(
+        "[data-content-search-turn-key]"
+      ) ||
+      bubble.closest(
+        "[data-chatgpt-search-unit-key]"
+      ) ||
       bubble
     );
   };
 
-  /**
-   * 사용자 질문 내용
-   */
   const getMessageText = (bubble) => {
     return (
       bubble.innerText
@@ -35,120 +84,406 @@
     );
   };
 
-  /**
-   * Rewind 목차 생성
-   */
-  const getOutline = () => {
-    const bubbles = findUserMessages();
+  const parsePosition = (value) => {
+    if (!value) {
+      return null;
+    }
 
-    console.log(
-      `[Rewind] user messages found: ${bubbles.length}`
-    );
+    const match =
+      value.match(/fallback-turn-(\d+)/);
 
-    const items = [];
+    if (!match) {
+      return null;
+    }
 
-    bubbles.forEach((bubble, index) => {
-      const turn = getTurnElement(bubble);
+    return Number(match[1]);
+  };
 
-      const text = getMessageText(bubble);
+  const getPosition = (
+    bubble,
+    fallbackIndex
+  ) => {
+    const elements = [
+      bubble,
+      bubble.closest(
+        "[data-content-search-turn-key]"
+      ),
+      bubble.closest(
+        "[data-chatgpt-search-unit-key]"
+      ),
+      bubble.closest("[data-turn-key]"),
+    ].filter(Boolean);
 
-      if (!text) {
-        return;
+    for (const element of elements) {
+      const candidates = [
+        element.getAttribute(
+          "data-content-search-turn-key"
+        ),
+        element.getAttribute(
+          "data-chatgpt-search-unit-key"
+        ),
+      ];
+
+      for (const candidate of candidates) {
+        const position =
+          parsePosition(candidate);
+
+        if (position !== null) {
+          return position;
+        }
       }
+    }
 
-      /**
-       * ChatGPT 자체 turn-key가 있으면 사용
-       */
-      const turnKey =
-        turn.getAttribute("data-turn-key") ||
-        `rewind-${index}`;
+    return fallbackIndex;
+  };
 
-      /**
-       * 우리가 이동할 수 있도록 DOM에도 저장
-       */
-      turn.dataset.rewindId = turnKey;
+  const getMessageId = (
+    turn,
+    bubble,
+    text,
+    position
+  ) => {
+    const turnKey =
+      turn.getAttribute("data-turn-key");
 
-      items.push({
-        id: turnKey,
-        index: index + 1,
-        title:
-          text.length > 70
-            ? `${text.slice(0, 70)}...`
-            : text,
-        text,
-      });
-    });
+    if (turnKey) {
+      return turnKey;
+    }
 
-    return items;
+    const messageContainer =
+      bubble.closest(
+        "[data-chatgpt-search-message-ids]"
+      );
+
+    const messageId =
+      messageContainer?.getAttribute(
+        "data-chatgpt-search-message-ids"
+      );
+
+    if (messageId) {
+      return messageId;
+    }
+
+    return `fallback-${position}-${hashString(
+      text
+    )}`;
+  };
+
+  const getCurrentItems = () => {
+    const bubbles =
+      findUserMessages();
+
+    return bubbles
+      .map((bubble, index) => {
+        const text =
+          getMessageText(bubble);
+
+        if (!text) {
+          return null;
+        }
+
+        const turn =
+          getTurnElement(bubble);
+
+        const position =
+          getPosition(
+            bubble,
+            index
+          );
+
+        const id =
+          getMessageId(
+            turn,
+            bubble,
+            text,
+            position
+          );
+
+        turn.dataset.rewindId = id;
+
+        turn.dataset.rewindPosition =
+          String(position);
+
+        return {
+          id,
+          position,
+
+          title:
+            text.length > 70
+              ? `${text.slice(0, 70)}...`
+              : text,
+
+          text,
+        };
+      })
+      .filter(Boolean);
   };
 
   /**
-   * 질문 클릭 → 해당 위치로 이동
+   * 기존 저장 데이터 읽기
+   *
+   * v0.2 / v0.3 배열 형식도 호환
    */
-  const scrollToMessage = (id) => {
-    const elements = document.querySelectorAll(
-      "[data-rewind-id]"
-    );
+  const getSavedConversation =
+    async () => {
+      const key =
+        getConversationKey();
 
-    const target = Array.from(elements).find(
+      const result =
+        await chrome.storage.local.get(
+          key
+        );
+
+      const value =
+        result[key];
+
+      /**
+       * 이전 버전 데이터
+       */
+      if (Array.isArray(value)) {
+        return {
+          id: getConversationId(),
+          title:
+            getConversationTitle(),
+          url: getConversationUrl(),
+          updatedAt: Date.now(),
+          items: value,
+        };
+      }
+
+      return (
+        value ?? {
+          id: getConversationId(),
+          title:
+            getConversationTitle(),
+          url: getConversationUrl(),
+          updatedAt: Date.now(),
+          items: [],
+        }
+      );
+    };
+
+  const saveCurrentItems =
+    async () => {
+      /**
+       * /c/...가 아닌 페이지에서도
+       * 동작은 하지만 새 채팅은
+       * URL 확정 후 저장되는 게 가장 안정적
+       */
+      const key =
+        getConversationKey();
+
+      const currentItems =
+        getCurrentItems();
+
+      const conversation =
+        await getSavedConversation();
+
+      const map =
+        new Map();
+
+      conversation.items.forEach(
+        (item) => {
+          map.set(item.id, item);
+        }
+      );
+
+      currentItems.forEach(
+        (item) => {
+          map.set(item.id, item);
+        }
+      );
+
+      const items =
+        Array.from(map.values())
+          .sort(
+            (a, b) =>
+              a.position -
+              b.position
+          )
+          .map((item, index) => ({
+            ...item,
+            index: index + 1,
+          }));
+
+      const updatedConversation = {
+        id: getConversationId(),
+
+        title:
+          getConversationTitle(),
+
+        url:
+          getConversationUrl(),
+
+        updatedAt:
+          Date.now(),
+
+        items,
+      };
+
+      await chrome.storage.local.set({
+        [key]: updatedConversation,
+      });
+
+      return updatedConversation;
+    };
+
+  const findMountedTarget = (id) => {
+    return Array.from(
+      document.querySelectorAll(
+        "[data-rewind-id]"
+      )
+    ).find(
       (element) =>
         element.dataset.rewindId === id
     );
+  };
 
-    if (!target) {
-      console.warn(
-        "[Rewind] target not found:",
-        id
-      );
+  const getMountedPositionRange =
+    () => {
+      const items =
+        getCurrentItems();
 
-      return false;
-    }
+      if (!items.length) {
+        return null;
+      }
 
+      const positions =
+        items
+          .map(
+            (item) =>
+              item.position
+          )
+          .filter(
+            Number.isFinite
+          );
+
+      if (!positions.length) {
+        return null;
+      }
+
+      return {
+        min:
+          Math.min(...positions),
+
+        max:
+          Math.max(...positions),
+      };
+    };
+
+  const revealTarget = (
+    target
+  ) => {
     target.scrollIntoView({
       behavior: "smooth",
       block: "center",
     });
 
-    /**
-     * 이동한 위치 잠깐 강조
-     */
-    const previousOutline =
+    const oldOutline =
       target.style.outline;
 
-    const previousRadius =
+    const oldRadius =
       target.style.borderRadius;
 
     target.style.outline =
-      "2px solid rgba(120, 120, 120, 0.45)";
+      "2px solid rgba(80, 80, 80, 0.55)";
 
     target.style.borderRadius =
       "12px";
 
     window.setTimeout(() => {
       target.style.outline =
-        previousOutline;
+        oldOutline;
 
       target.style.borderRadius =
-        previousRadius;
-    }, 1200);
-
-    return true;
+        oldRadius;
+    }, 1400);
   };
 
+const findAndScrollToMessage = async (id) => {
+  await saveCurrentItems();
+
+  const target =
+    findMountedTarget(id);
+
+  if (!target) {
+    console.log(
+      "[Rewind] target is not currently mounted:",
+      id
+    );
+
+    return false;
+  }
+
+  revealTarget(target);
+
+  return true;
+};
+
   /**
-   * Side Panel → content.js 메시지 수신
+   * 다른 채팅 검색결과를 눌렀을 경우
+   * 페이지 이동 후 자동 점프
    */
+const handlePendingJump = async () => {
+  const result =
+    await chrome.storage.local.get(
+      PENDING_JUMP_KEY
+    );
+
+  const pending =
+    result[PENDING_JUMP_KEY];
+
+  if (!pending) {
+    return;
+  }
+
+  if (
+    pending.conversationId !==
+    getConversationId()
+  ) {
+    return;
+  }
+
+  /**
+   * 중요:
+   * 실행 전에 먼저 제거해서
+   * 실패하더라도 반복 실행되지 않게 함
+   */
+  await chrome.storage.local.remove(
+    PENDING_JUMP_KEY
+  );
+
+  await sleep(700);
+
+  const success =
+    await findAndScrollToMessage(
+      pending.messageId
+    );
+
+  console.log(
+    "[Rewind] pending jump:",
+    success ? "success" : "target not mounted"
+  );
+};
+
   chrome.runtime.onMessage.addListener(
-    (message, _sender, sendResponse) => {
+    (
+      message,
+      _sender,
+      sendResponse
+    ) => {
       if (
         message.type ===
         "rewind:get-outline"
       ) {
-        const items = getOutline();
-
-        sendResponse({
-          items,
-        });
+        saveCurrentItems()
+          .then((conversation) => {
+            sendResponse({
+              conversation,
+              items:
+                conversation.items,
+            });
+          });
 
         return true;
       }
@@ -157,11 +492,12 @@
         message.type ===
         "rewind:scroll-to"
       ) {
-        const success =
-          scrollToMessage(message.id);
-
-        sendResponse({
-          success,
+        findAndScrollToMessage(
+          message.id
+        ).then((success) => {
+          sendResponse({
+            success,
+          });
         });
 
         return true;
@@ -169,54 +505,152 @@
     }
   );
 
-  /**
-   * ChatGPT SPA DOM 변화 감지
-   */
   let updateTimer;
 
-  const observer = new MutationObserver(
-    (mutations) => {
-      const changed = mutations.some(
-        (mutation) =>
-          mutation.addedNodes.length > 0 ||
-          mutation.removedNodes.length > 0
-      );
-
-      if (!changed) {
-        return;
-      }
-
-      window.clearTimeout(updateTimer);
-
-      updateTimer = window.setTimeout(
-        () => {
-          const count =
-            findUserMessages().length;
-
-          console.log(
-            `[Rewind] DOM updated: ${count} user messages`
+  const observer =
+    new MutationObserver(
+      (mutations) => {
+        const changed =
+          mutations.some(
+            (mutation) =>
+              mutation.addedNodes
+                .length ||
+              mutation.removedNodes
+                .length
           );
 
-          chrome.runtime
-            .sendMessage({
-              type:
-                "rewind:outline-updated",
-            })
-            .catch(() => {
-              // Rewind 패널이 닫혀있으면 무시
-            });
-        },
-        400
-      );
+        if (!changed) {
+          return;
+        }
+
+        clearTimeout(
+          updateTimer
+        );
+
+        updateTimer =
+          setTimeout(
+            async () => {
+              try {
+                await saveCurrentItems();
+
+                chrome.runtime
+                  .sendMessage({
+                    type:
+                      "rewind:outline-updated",
+                  })
+                  .catch(() => {});
+              } catch (error) {
+                console.error(
+                  "[Rewind]",
+                  error
+                );
+              }
+            },
+            400
+          );
+      }
+    );
+
+  observer.observe(
+    document.body,
+    {
+      childList: true,
+      subtree: true,
     }
   );
 
-  observer.observe(document.body, {
-    childList: true,
-    subtree: true,
-  });
+  saveCurrentItems()
+    .then(() => {
+      handlePendingJump();
+    })
+    .catch(console.error);
+
+    /**
+ * 최초 대화 저장
+ */
+saveCurrentItems()
+  .then(() => {
+    handlePendingJump();
+  })
+  .catch(console.error);
+
+
+/**
+ * ======================================================
+ * ChatGPT SPA 대화 변경 감지
+ *
+ * /c/AAAA
+ *      ↓
+ * /c/BBBB
+ *
+ * ChatGPT는 페이지 전체 reload 없이
+ * 대화만 바꾸므로 pathname 변경을 감지해야 한다.
+ * ======================================================
+ */
+
+let lastPathname = location.pathname;
+
+const handleConversationChange = async () => {
+  const currentPathname = location.pathname;
+
+  if (currentPathname === lastPathname) {
+    return;
+  }
+
+  const previousPathname = lastPathname;
+
+  lastPathname = currentPathname;
 
   console.log(
-    "[Rewind] observer started"
+    "[Rewind] conversation changed:",
+    previousPathname,
+    "→",
+    currentPathname
   );
+
+  /**
+   * ChatGPT가 새 대화 DOM을 렌더링할 시간
+   */
+  await sleep(1000);
+
+  try {
+    const conversation =
+      await saveCurrentItems();
+
+    console.log(
+      "[Rewind] indexed conversation:",
+      conversation.title,
+      conversation.items.length,
+      "questions"
+    );
+
+    chrome.runtime
+      .sendMessage({
+        type: "rewind:outline-updated",
+      })
+      .catch(() => {});
+
+    await handlePendingJump();
+  } catch (error) {
+    console.error(
+      "[Rewind] conversation change error:",
+      error
+    );
+  }
+};
+
+
+/**
+ * ChatGPT 내부 라우팅은 구현이 바뀔 수 있으므로
+ * 단순 pathname 감시를 fallback으로 사용
+ */
+window.setInterval(() => {
+  if (
+    location.pathname !==
+    lastPathname
+  ) {
+    handleConversationChange();
+  }
+}, 500);
+
 })();

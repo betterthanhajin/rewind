@@ -124,3 +124,55 @@ header {
 
   color: #aaa;
 }
+
+.section-title {
+  margin-top: 22px;
+  margin-bottom: 8px;
+
+  font-size: 11px;
+  font-weight: 600;
+
+  letter-spacing: 0.08em;
+
+  color: #999;
+}
+
+.results {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.search-result {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+
+  width: 100%;
+
+  padding: 12px;
+
+  border: 0;
+  border-radius: 10px;
+
+  background: transparent;
+
+  text-align: left;
+
+  cursor: pointer;
+}
+
+.search-result:hover {
+  background: #eeeeee;
+}
+
+.result-chat {
+  color: #888;
+  font-size: 11px;
+}
+
+.result-text {
+  color: #222;
+  font-size: 13px;
+  line-height: 1.45;
+}

@@ -1,109 +1,212 @@
-import { useEffect, useMemo, useState } from "react";
+import {
+  useEffect,
+  useMemo,
+  useState,
+} from "react";
+
 import "./App.css";
 
 type OutlineItem = {
   id: string;
   index: number;
+  position: number;
   title: string;
   text: string;
 };
 
-type OutlineResponse = {
-  items?: OutlineItem[];
+type Conversation = {
+  id: string;
+  title: string;
+  url: string;
+  updatedAt: number;
+  items: OutlineItem[];
 };
 
-function App() {
-  const [items, setItems] = useState<OutlineItem[]>([]);
-  const [search, setSearch] = useState("");
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState("");
+type SearchResult = {
+  conversation: Conversation;
+  item: OutlineItem;
+};
 
-  useEffect(() => {
-    /**
-     * 현재 ChatGPT 탭에서 질문 목록 가져오기
-     */
-    const loadOutline = () => {
+const STORAGE_PREFIX =
+  "rewind:conversation:";
+
+const PENDING_JUMP_KEY =
+  "rewind:pending-jump";
+
+function App() {
+  const [
+    currentConversation,
+    setCurrentConversation,
+  ] =
+    useState<Conversation | null>(
+      null
+    );
+
+  const [
+    conversations,
+    setConversations,
+  ] = useState<Conversation[]>([]);
+
+  const [search, setSearch] =
+    useState("");
+
+  const [loading, setLoading] =
+    useState(true);
+
+  const loadStoredConversations =
+    () => {
+      chrome.storage.local.get(
+        null,
+        (data) => {
+          const result =
+            Object.entries(data)
+              .filter(([key]) =>
+                key.startsWith(
+                  STORAGE_PREFIX
+                )
+              )
+              .map(
+                ([, value]) =>
+                  value as Conversation
+              )
+              .filter(
+                (conversation) =>
+                  conversation &&
+                  Array.isArray(
+                    conversation.items
+                  )
+              )
+              .sort(
+                (a, b) =>
+                  b.updatedAt -
+                  a.updatedAt
+              );
+
+          setConversations(
+            result
+          );
+        }
+      );
+    };
+
+  const loadCurrentConversation =
+    () => {
       chrome.tabs.query(
         {
           active: true,
           currentWindow: true,
         },
+
         ([tab]) => {
           if (!tab?.id) {
             setLoading(false);
-            setError("현재 탭을 찾을 수 없습니다.");
             return;
           }
 
           chrome.tabs.sendMessage(
             tab.id,
+
             {
-              type: "rewind:get-outline",
+              type:
+                "rewind:get-outline",
             },
-            (response: OutlineResponse | undefined) => {
-              /**
-               * content script가 없는 페이지에서
-               * sendMessage를 호출하면 여기로 들어옴
-               */
-              if (chrome.runtime.lastError) {
-                setItems([]);
+
+            (response) => {
+              if (
+                chrome.runtime
+                  .lastError
+              ) {
                 setLoading(false);
-
-                setError(
-                  "ChatGPT 페이지에서 Rewind를 사용할 수 있습니다."
-                );
-
                 return;
               }
 
-              setItems(response?.items ?? []);
+              setCurrentConversation(
+                response?.conversation ??
+                  null
+              );
+
               setLoading(false);
-              setError("");
+
+              loadStoredConversations();
             }
           );
         }
       );
     };
 
-    /**
-     * content.js에서
-     *
-     * rewind:outline-updated
-     *
-     * 이벤트가 오면 질문 목록 다시 읽기
-     */
-    const handleMessage = (message: { type?: string }) => {
-      if (message.type === "rewind:outline-updated") {
-        loadOutline();
+  useEffect(() => {
+    const timer =
+      window.setTimeout(() => {
+        loadCurrentConversation();
+        loadStoredConversations();
+      }, 0);
+
+    const messageListener = (
+      message: {
+        type?: string;
+      }
+    ) => {
+      if (
+        message.type ===
+        "rewind:outline-updated"
+      ) {
+        loadCurrentConversation();
+        loadStoredConversations();
       }
     };
 
-    chrome.runtime.onMessage.addListener(handleMessage);
+    const storageListener = (
+      changes: {
+        [key: string]:
+          chrome.storage.StorageChange;
+      }
+    ) => {
+      const changed =
+        Object.keys(
+          changes
+        ).some((key) =>
+          key.startsWith(
+            STORAGE_PREFIX
+          )
+        );
 
-    /**
-     * Effect 실행 중 바로 React state를
-     * 변경하지 않도록 이벤트 큐 이후 최초 로드
-     */
-    const timer = window.setTimeout(() => {
-      loadOutline();
-    }, 0);
+      if (changed) {
+        loadStoredConversations();
+      }
+    };
+
+    chrome.runtime.onMessage.addListener(
+      messageListener
+    );
+
+    chrome.storage.onChanged.addListener(
+      storageListener
+    );
 
     return () => {
-      window.clearTimeout(timer);
+      window.clearTimeout(
+        timer
+      );
 
-      chrome.runtime.onMessage.removeListener(handleMessage);
+      chrome.runtime.onMessage.removeListener(
+        messageListener
+      );
+
+      chrome.storage.onChanged.removeListener(
+        storageListener
+      );
     };
   }, []);
 
-  /**
-   * 선택한 질문 위치로 이동
-   */
-  const jumpToMessage = (id: string) => {
+  const jumpCurrent = (
+    id: string
+  ) => {
     chrome.tabs.query(
       {
         active: true,
         currentWindow: true,
       },
+
       ([tab]) => {
         if (!tab?.id) {
           return;
@@ -112,125 +215,248 @@ function App() {
         chrome.tabs.sendMessage(
           tab.id,
           {
-            type: "rewind:scroll-to",
+            type:
+              "rewind:scroll-to",
             id,
-          },
-          (response) => {
-            if (chrome.runtime.lastError) {
-              console.error(
-                "Rewind scroll error:",
-                chrome.runtime.lastError.message
-              );
-
-              return;
-            }
-
-            if (!response?.success) {
-              console.warn(
-                "Rewind: 해당 메시지를 찾을 수 없습니다."
-              );
-            }
           }
         );
       }
     );
   };
 
-  /**
-   * 검색
-   */
-  const filteredItems = useMemo(() => {
-    const keyword = search.trim().toLowerCase();
+  const openSearchResult =
+    async (
+      result: SearchResult
+    ) => {
+      /**
+       * 현재 대화라면 바로 이동
+       */
+      if (
+        result.conversation.id ===
+        currentConversation?.id
+      ) {
+        jumpCurrent(
+          result.item.id
+        );
 
-    if (!keyword) {
-      return items;
-    }
+        return;
+      }
 
-    return items.filter((item) =>
-      item.text.toLowerCase().includes(keyword)
+      const [tab] =
+        await chrome.tabs.query({
+          active: true,
+          currentWindow: true,
+        });
+
+      if (!tab?.id) {
+        return;
+      }
+
+      /**
+       * 이동 후 어떤 메시지를
+       * 찾아갈지 저장
+       */
+      await chrome.storage.local.set({
+        [PENDING_JUMP_KEY]: {
+          conversationId:
+            result.conversation.id,
+
+          messageId:
+            result.item.id,
+
+          createdAt:
+            Date.now(),
+        },
+      });
+
+      await chrome.tabs.update(
+        tab.id,
+        {
+          url:
+            result.conversation.url,
+        }
+      );
+    };
+
+  const searchResults =
+    useMemo(() => {
+      const keyword =
+        search
+          .trim()
+          .toLowerCase();
+
+      if (!keyword) {
+        return [];
+      }
+
+      const results:
+        SearchResult[] = [];
+
+      conversations.forEach(
+        (conversation) => {
+          conversation.items.forEach(
+            (item) => {
+              if (
+                item.text
+                  .toLowerCase()
+                  .includes(
+                    keyword
+                  )
+              ) {
+                results.push({
+                  conversation,
+                  item,
+                });
+              }
+            }
+          );
+        }
+      );
+
+      return results;
+    }, [
+      conversations,
+      search,
+    ]);
+
+  if (loading) {
+    return (
+      <main className="rewind">
+        <div className="status">
+          Loading Rewind...
+        </div>
+      </main>
     );
-  }, [items, search]);
+  }
 
   return (
     <main className="rewind">
       <header>
         <div className="logo">
-          <span className="logo-icon">↩</span>
+          <span className="logo-icon">
+            ↩
+          </span>
 
           <div>
             <h1>Rewind</h1>
 
             <p>
-              Never lose a conversation again.
+              Find what you already
+              discussed.
             </p>
           </div>
         </div>
       </header>
 
-      <div className="search-wrapper">
-        <input
-          className="search"
-          type="text"
-          placeholder="Search this conversation..."
-          value={search}
-          onChange={(event) => {
-            setSearch(event.target.value);
-          }}
-        />
-      </div>
+      <input
+        className="search"
+        placeholder="Search all conversations..."
+        value={search}
+        onChange={(event) =>
+          setSearch(
+            event.target.value
+          )
+        }
+      />
 
-      {loading && (
-        <div className="status">
-          Loading conversation...
-        </div>
-      )}
-
-      {!loading && error && (
-        <div className="status error">
-          {error}
-        </div>
-      )}
-
-      {!loading && !error && (
+      {!search && (
         <>
+          <div className="section-title">
+            THIS CONVERSATION
+          </div>
+
           <div className="meta">
-            {search
-              ? `${filteredItems.length} / ${items.length} questions`
-              : `${items.length} questions`}
+            {currentConversation
+              ?.items.length ?? 0}{" "}
+            questions
           </div>
 
           <section className="outline">
-            {filteredItems.map((item) => (
-              <button
-                key={item.id}
-                type="button"
-                className="message"
-                onClick={() => {
-                  jumpToMessage(item.id);
-                }}
-              >
-                <span className="number">
-                  {item.index}
-                </span>
+            {currentConversation
+              ?.items.map(
+                (item) => (
+                  <button
+                    key={
+                      item.id
+                    }
+                    className="message"
+                    onClick={() =>
+                      jumpCurrent(
+                        item.id
+                      )
+                    }
+                  >
+                    <span className="number">
+                      {
+                        item.index
+                      }
+                    </span>
 
-                <span className="title">
-                  {item.title}
-                </span>
-              </button>
-            ))}
+                    <span className="title">
+                      {
+                        item.title
+                      }
+                    </span>
+                  </button>
+                )
+              )}
+          </section>
+        </>
+      )}
 
-            {items.length === 0 && (
-              <div className="empty">
-                아직 찾은 질문이 없습니다.
-              </div>
+      {search && (
+        <>
+          <div className="section-title">
+            SEARCH RESULTS
+          </div>
+
+          <div className="meta">
+            {
+              searchResults.length
+            }{" "}
+            results
+          </div>
+
+          <section className="results">
+            {searchResults.map(
+              (
+                result,
+                index
+              ) => (
+                <button
+                  key={`${result.conversation.id}-${result.item.id}-${index}`}
+                  className="search-result"
+                  onClick={() =>
+                    openSearchResult(
+                      result
+                    )
+                  }
+                >
+                  <span className="result-chat">
+                    {
+                      result
+                        .conversation
+                        .title
+                    }
+                  </span>
+
+                  <span className="result-text">
+                    {
+                      result
+                        .item
+                        .title
+                    }
+                  </span>
+                </button>
+              )
             )}
 
-            {items.length > 0 &&
-              filteredItems.length === 0 && (
-                <div className="empty">
-                  검색 결과가 없습니다.
-                </div>
-              )}
+            {searchResults.length ===
+              0 && (
+              <div className="empty">
+                No conversations found.
+              </div>
+            )}
           </section>
         </>
       )}
