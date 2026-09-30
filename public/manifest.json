@@ -1,12 +1,13 @@
 {
   "manifest_version": 3,
   "name": "Rewind",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "description": "Jump back to important moments in your ChatGPT conversations.",
   "permissions": [
-    "sidePanel",
-    "tabs",
-    "storage"
+  "sidePanel",
+  "tabs",
+  "storage",
+  "history"
   ],
   "host_permissions": [
     "https://chatgpt.com/*",

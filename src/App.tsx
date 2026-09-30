@@ -1,10 +1,16 @@
 import {
+  useCallback,
   useEffect,
   useMemo,
   useState,
 } from "react";
 
 import "./App.css";
+
+import {
+  getChatGPTHistory,
+  type HistoryConversation,
+} from "./lib/chatHistory";
 
 type OutlineItem = {
   id: string;
@@ -30,8 +36,51 @@ type SearchResult = {
 const STORAGE_PREFIX =
   "rewind:conversation:";
 
-const PENDING_JUMP_KEY =
-  "rewind:pending-jump";
+const getCurrentTab =
+  async () => {
+    const [tab] =
+      await chrome.tabs.query({
+        active: true,
+        currentWindow: true,
+      });
+
+    return tab;
+  };
+
+const getStoredConversations =
+  async (): Promise<Conversation[]> => {
+    const data =
+      await chrome.storage.local.get(
+        null
+      );
+
+    return Object.entries(data)
+      .filter(([key]) =>
+        key.startsWith(
+          STORAGE_PREFIX
+        )
+      )
+      .map(
+        ([, value]) =>
+          value as Conversation
+      )
+      .filter(
+        (
+          conversation
+        ): conversation is Conversation =>
+          Boolean(
+            conversation &&
+              Array.isArray(
+                conversation.items
+              )
+          )
+      )
+      .sort(
+        (a, b) =>
+          b.updatedAt -
+          a.updatedAt
+      );
+  };
 
 function App() {
   const [
@@ -47,98 +96,93 @@ function App() {
     setConversations,
   ] = useState<Conversation[]>([]);
 
+  const [
+    historyConversations,
+    setHistoryConversations,
+  ] = useState<
+    HistoryConversation[]
+  >([]);
+
   const [search, setSearch] =
     useState("");
 
   const [loading, setLoading] =
     useState(true);
 
-  const loadStoredConversations =
-    () => {
-      chrome.storage.local.get(
-        null,
-        (data) => {
-          const result =
-            Object.entries(data)
-              .filter(([key]) =>
-                key.startsWith(
-                  STORAGE_PREFIX
-                )
-              )
-              .map(
-                ([, value]) =>
-                  value as Conversation
-              )
-              .filter(
-                (conversation) =>
-                  conversation &&
-                  Array.isArray(
-                    conversation.items
-                  )
-              )
-              .sort(
-                (a, b) =>
-                  b.updatedAt -
-                  a.updatedAt
-              );
+  const refreshConversations =
+    useCallback(async () => {
+      const stored =
+        await getStoredConversations();
 
-          setConversations(
-            result
-          );
-        }
-      );
-    };
+      setConversations(stored);
+    }, []);
 
-  const loadCurrentConversation =
-    () => {
-      chrome.tabs.query(
+  const refreshHistory =
+    useCallback(async () => {
+      try {
+        const history =
+          await getChatGPTHistory();
+
+        setHistoryConversations(
+          history
+        );
+      } catch (error) {
+        console.error(
+          "[Rewind] history error:",
+          error
+        );
+      }
+    }, []);
+
+  const refreshCurrentConversation =
+    useCallback(async () => {
+      const tab =
+        await getCurrentTab();
+
+      if (!tab?.id) {
+        setLoading(false);
+        return;
+      }
+
+      chrome.tabs.sendMessage(
+        tab.id,
         {
-          active: true,
-          currentWindow: true,
+          type:
+            "rewind:get-outline",
         },
+        async (response) => {
+          if (
+            chrome.runtime.lastError
+          ) {
+            setCurrentConversation(
+              null
+            );
 
-        ([tab]) => {
-          if (!tab?.id) {
             setLoading(false);
+
             return;
           }
 
-          chrome.tabs.sendMessage(
-            tab.id,
-
-            {
-              type:
-                "rewind:get-outline",
-            },
-
-            (response) => {
-              if (
-                chrome.runtime
-                  .lastError
-              ) {
-                setLoading(false);
-                return;
-              }
-
-              setCurrentConversation(
-                response?.conversation ??
-                  null
-              );
-
-              setLoading(false);
-
-              loadStoredConversations();
-            }
+          setCurrentConversation(
+            response?.conversation ??
+              null
           );
+
+          await refreshConversations();
+
+          setLoading(false);
         }
       );
-    };
+    }, [
+      refreshConversations,
+    ]);
 
   useEffect(() => {
     const timer =
       window.setTimeout(() => {
-        loadCurrentConversation();
-        loadStoredConversations();
+        void refreshCurrentConversation();
+        void refreshConversations();
+        void refreshHistory();
       }, 0);
 
     const messageListener = (
@@ -150,8 +194,8 @@ function App() {
         message.type ===
         "rewind:outline-updated"
       ) {
-        loadCurrentConversation();
-        loadStoredConversations();
+        void refreshCurrentConversation();
+        void refreshHistory();
       }
     };
 
@@ -171,7 +215,7 @@ function App() {
         );
 
       if (changed) {
-        loadStoredConversations();
+        void refreshConversations();
       }
     };
 
@@ -184,9 +228,7 @@ function App() {
     );
 
     return () => {
-      window.clearTimeout(
-        timer
-      );
+      window.clearTimeout(timer);
 
       chrome.runtime.onMessage.removeListener(
         messageListener
@@ -196,84 +238,48 @@ function App() {
         storageListener
       );
     };
-  }, []);
+  }, [
+    refreshCurrentConversation,
+    refreshConversations,
+    refreshHistory,
+  ]);
 
-  const jumpCurrent = (
-    id: string
-  ) => {
-    chrome.tabs.query(
-      {
-        active: true,
-        currentWindow: true,
-      },
-
-      ([tab]) => {
-        if (!tab?.id) {
-          return;
-        }
-
-        chrome.tabs.sendMessage(
-          tab.id,
-          {
-            type:
-              "rewind:scroll-to",
-            id,
-          }
-        );
-      }
-    );
-  };
-
-  const openSearchResult =
+  const jumpCurrent =
     async (
-      result: SearchResult
+      id: string
     ) => {
-      /**
-       * 현재 대화라면 바로 이동
-       */
-      if (
-        result.conversation.id ===
-        currentConversation?.id
-      ) {
-        jumpCurrent(
-          result.item.id
-        );
-
-        return;
-      }
-
-      const [tab] =
-        await chrome.tabs.query({
-          active: true,
-          currentWindow: true,
-        });
+      const tab =
+        await getCurrentTab();
 
       if (!tab?.id) {
         return;
       }
 
-      /**
-       * 이동 후 어떤 메시지를
-       * 찾아갈지 저장
-       */
-      await chrome.storage.local.set({
-        [PENDING_JUMP_KEY]: {
-          conversationId:
-            result.conversation.id,
+      chrome.tabs.sendMessage(
+        tab.id,
+        {
+          type:
+            "rewind:scroll-to",
+          id,
+        }
+      );
+    };
 
-          messageId:
-            result.item.id,
+  const openUrl =
+    async (
+      url: string
+    ) => {
+      const tab =
+        await getCurrentTab();
 
-          createdAt:
-            Date.now(),
-        },
-      });
+      if (!tab?.id) {
+        return;
+      }
 
       await chrome.tabs.update(
         tab.id,
         {
-          url:
-            result.conversation.url,
+          url,
         }
       );
     };
@@ -319,6 +325,79 @@ function App() {
       search,
     ]);
 
+  /**
+   * 브라우저 기록에는 있지만
+   * Rewind에는 아직 저장되지 않은 대화
+   */
+  const unindexedConversations =
+    useMemo(() => {
+      const indexedIds =
+        new Set(
+          conversations.map(
+            (conversation) =>
+              conversation.id
+          )
+        );
+
+      return historyConversations.filter(
+        (conversation) =>
+          !indexedIds.has(
+            conversation.id
+          )
+      );
+    }, [
+      conversations,
+      historyConversations,
+    ]);
+
+  const totalQuestions =
+    useMemo(
+      () =>
+        conversations.reduce(
+          (
+            total,
+            conversation
+          ) =>
+            total +
+            conversation.items
+              .length,
+          0
+        ),
+      [conversations]
+    );
+
+  const otherConversations =
+    useMemo(
+      () =>
+        conversations.filter(
+          (conversation) =>
+            conversation.id !==
+            currentConversation?.id
+        ),
+      [
+        conversations,
+        currentConversation,
+      ]
+    );
+
+  const formatDate = (
+    timestamp: number
+  ) => {
+    if (!timestamp) {
+      return "";
+    }
+
+    return new Intl.DateTimeFormat(
+      "ko-KR",
+      {
+        month: "short",
+        day: "numeric",
+      }
+    ).format(
+      new Date(timestamp)
+    );
+  };
+
   if (loading) {
     return (
       <main className="rewind">
@@ -350,7 +429,8 @@ function App() {
 
       <input
         className="search"
-        placeholder="Search all conversations..."
+        type="search"
+        placeholder="Search your memory..."
         value={search}
         onChange={(event) =>
           setSearch(
@@ -359,16 +439,112 @@ function App() {
         }
       />
 
-      {!search && (
+      <div className="stats">
+        <div className="stat">
+          <strong>
+            {
+              conversations.length
+            }
+          </strong>
+
+          <span>
+            conversations
+          </span>
+        </div>
+
+        <div className="stat">
+          <strong>
+            {totalQuestions}
+          </strong>
+
+          <span>
+            questions
+          </span>
+        </div>
+      </div>
+
+      {search ? (
         <>
-          <div className="section-title">
-            THIS CONVERSATION
+          <div className="section-heading">
+            <span>
+              SEARCH RESULTS
+            </span>
+
+            <span>
+              {
+                searchResults.length
+              }
+            </span>
           </div>
 
-          <div className="meta">
-            {currentConversation
-              ?.items.length ?? 0}{" "}
-            questions
+          <section className="results">
+            {searchResults.map(
+              (result) => (
+                <button
+                  key={`${result.conversation.id}-${result.item.id}`}
+                  type="button"
+                  className="search-result"
+                  onClick={() => {
+                    if (
+                      result
+                        .conversation
+                        .id ===
+                      currentConversation
+                        ?.id
+                    ) {
+                      void jumpCurrent(
+                        result.item
+                          .id
+                      );
+
+                      return;
+                    }
+
+                    void openUrl(
+                      result
+                        .conversation
+                        .url
+                    );
+                  }}
+                >
+                  <span className="result-chat">
+                    {
+                      result
+                        .conversation
+                        .title
+                    }
+                  </span>
+
+                  <span className="result-text">
+                    {
+                      result.item
+                        .title
+                    }
+                  </span>
+                </button>
+              )
+            )}
+
+            {searchResults.length ===
+              0 && (
+              <div className="empty">
+                저장된 대화에서는
+                검색 결과가 없습니다.
+              </div>
+            )}
+          </section>
+        </>
+      ) : (
+        <>
+          <div className="section-heading">
+            <span>
+              THIS CONVERSATION
+            </span>
+
+            <span>
+              {currentConversation
+                ?.items.length ?? 0}
+            </span>
           </div>
 
           <section className="outline">
@@ -376,12 +552,11 @@ function App() {
               ?.items.map(
                 (item) => (
                   <button
-                    key={
-                      item.id
-                    }
+                    key={item.id}
+                    type="button"
                     className="message"
                     onClick={() =>
-                      jumpCurrent(
+                      void jumpCurrent(
                         item.id
                       )
                     }
@@ -401,60 +576,129 @@ function App() {
                 )
               )}
           </section>
-        </>
-      )}
 
-      {search && (
-        <>
-          <div className="section-title">
-            SEARCH RESULTS
+          <div className="section-heading indexed-heading">
+            <span>
+              INDEXED
+            </span>
+
+            <span>
+              {
+                otherConversations.length
+              }
+            </span>
           </div>
 
-          <div className="meta">
-            {
-              searchResults.length
-            }{" "}
-            results
-          </div>
-
-          <section className="results">
-            {searchResults.map(
+          <section className="conversation-list">
+            {otherConversations.map(
               (
-                result,
-                index
+                conversation
               ) => (
                 <button
-                  key={`${result.conversation.id}-${result.item.id}-${index}`}
-                  className="search-result"
+                  key={
+                    conversation.id
+                  }
+                  type="button"
+                  className="conversation-card"
                   onClick={() =>
-                    openSearchResult(
-                      result
+                    void openUrl(
+                      conversation.url
                     )
                   }
                 >
-                  <span className="result-chat">
-                    {
-                      result
-                        .conversation
-                        .title
-                    }
+                  <span className="memory-state">
+                    ✓
                   </span>
 
-                  <span className="result-text">
-                    {
-                      result
-                        .item
-                        .title
-                    }
+                  <div className="conversation-main">
+                    <span className="conversation-title">
+                      {
+                        conversation.title
+                      }
+                    </span>
+
+                    <span className="conversation-meta">
+                      {
+                        conversation
+                          .items
+                          .length
+                      }{" "}
+                      questions
+                    </span>
+                  </div>
+
+                  <span className="conversation-date">
+                    {formatDate(
+                      conversation.updatedAt
+                    )}
                   </span>
                 </button>
               )
             )}
+          </section>
 
-            {searchResults.length ===
+          <div className="section-heading indexed-heading">
+            <span>
+              RECENTLY VISITED
+            </span>
+
+            <span>
+              {
+                unindexedConversations.length
+              }
+            </span>
+          </div>
+
+          <section className="conversation-list">
+            {unindexedConversations
+              .slice(0, 50)
+              .map(
+                (
+                  conversation
+                ) => (
+                  <button
+                    key={
+                      conversation.id
+                    }
+                    type="button"
+                    className="conversation-card unindexed"
+                    onClick={() =>
+                      void openUrl(
+                        conversation.url
+                      )
+                    }
+                  >
+                    <span className="memory-state">
+                      ○
+                    </span>
+
+                    <div className="conversation-main">
+                      <span className="conversation-title">
+                        {
+                          conversation.title
+                        }
+                      </span>
+
+                      <span className="conversation-meta">
+                        Open to index
+                      </span>
+                    </div>
+
+                    <span className="conversation-date">
+                      {formatDate(
+                        conversation.lastVisitTime
+                      )}
+                    </span>
+                  </button>
+                )
+              )}
+
+            {unindexedConversations.length ===
               0 && (
               <div className="empty">
-                No conversations found.
+                최근 방문 기록에서
+                추가할 ChatGPT 대화가
+                없습니다.
               </div>
             )}
           </section>
