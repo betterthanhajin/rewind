@@ -36,17 +36,22 @@ type SearchResult = {
 const STORAGE_PREFIX =
   "rewind:conversation:";
 
-const getCurrentTab =
-  async () => {
-    const [tab] =
-      await chrome.tabs.query({
-        active: true,
-        currentWindow: true,
-      });
+/**
+ * 현재 활성화된 Chrome 탭
+ */
+const getCurrentTab = async () => {
+  const [tab] =
+    await chrome.tabs.query({
+      active: true,
+      currentWindow: true,
+    });
 
-    return tab;
-  };
+  return tab;
+};
 
+/**
+ * Rewind가 기억한 대화 전체
+ */
 const getStoredConversations =
   async (): Promise<Conversation[]> => {
     const data =
@@ -70,6 +75,8 @@ const getStoredConversations =
         ): conversation is Conversation =>
           Boolean(
             conversation &&
+              typeof conversation ===
+                "object" &&
               Array.isArray(
                 conversation.items
               )
@@ -77,12 +84,15 @@ const getStoredConversations =
       )
       .sort(
         (a, b) =>
-          b.updatedAt -
-          a.updatedAt
+          (b.updatedAt ?? 0) -
+          (a.updatedAt ?? 0)
       );
   };
 
 function App() {
+  /**
+   * 현재 ChatGPT 대화
+   */
   const [
     currentConversation,
     setCurrentConversation,
@@ -91,11 +101,18 @@ function App() {
       null
     );
 
+  /**
+   * Rewind가 이미 기억한 대화
+   */
   const [
     conversations,
     setConversations,
   ] = useState<Conversation[]>([]);
 
+  /**
+   * Chrome 방문 기록에 있는
+   * ChatGPT 대화
+   */
   const [
     historyConversations,
     setHistoryConversations,
@@ -109,14 +126,31 @@ function App() {
   const [loading, setLoading] =
     useState(true);
 
+  /**
+   * =========================
+   * 저장된 대화 새로 읽기
+   * =========================
+   */
   const refreshConversations =
     useCallback(async () => {
-      const stored =
-        await getStoredConversations();
+      try {
+        const stored =
+          await getStoredConversations();
 
-      setConversations(stored);
+        setConversations(stored);
+      } catch (error) {
+        console.error(
+          "[Rewind] storage error:",
+          error
+        );
+      }
     }, []);
 
+  /**
+   * =========================
+   * Chrome History 읽기
+   * =========================
+   */
   const refreshHistory =
     useCallback(async () => {
       try {
@@ -134,6 +168,11 @@ function App() {
       }
     }, []);
 
+  /**
+   * =========================
+   * 현재 ChatGPT 대화 읽기
+   * =========================
+   */
   const refreshCurrentConversation =
     useCallback(async () => {
       const tab =
@@ -151,8 +190,13 @@ function App() {
             "rewind:get-outline",
         },
         async (response) => {
+          /**
+           * ChatGPT가 아닌 페이지거나
+           * content.js가 없는 경우
+           */
           if (
-            chrome.runtime.lastError
+            chrome.runtime
+              .lastError
           ) {
             setCurrentConversation(
               null
@@ -177,7 +221,16 @@ function App() {
       refreshConversations,
     ]);
 
+  /**
+   * =========================
+   * 최초 초기화 / 이벤트 등록
+   * =========================
+   */
   useEffect(() => {
+    /**
+     * Effect 내부 즉시 state update
+     * eslint 경고 방지
+     */
     const timer =
       window.setTimeout(() => {
         void refreshCurrentConversation();
@@ -185,6 +238,10 @@ function App() {
         void refreshHistory();
       }, 0);
 
+    /**
+     * content.js에서
+     * 대화 내용이 변경됨
+     */
     const messageListener = (
       message: {
         type?: string;
@@ -199,13 +256,16 @@ function App() {
       }
     };
 
+    /**
+     * chrome.storage.local 변경
+     */
     const storageListener = (
       changes: {
         [key: string]:
           chrome.storage.StorageChange;
       }
     ) => {
-      const changed =
+      const rewindChanged =
         Object.keys(
           changes
         ).some((key) =>
@@ -214,7 +274,7 @@ function App() {
           )
         );
 
-      if (changed) {
+      if (rewindChanged) {
         void refreshConversations();
       }
     };
@@ -244,6 +304,11 @@ function App() {
     refreshHistory,
   ]);
 
+  /**
+   * =========================
+   * 현재 대화 질문으로 이동
+   * =========================
+   */
   const jumpCurrent =
     async (
       id: string
@@ -265,10 +330,19 @@ function App() {
       );
     };
 
+  /**
+   * =========================
+   * 특정 ChatGPT 대화 열기
+   * =========================
+   */
   const openUrl =
     async (
       url: string
     ) => {
+      if (!url) {
+        return;
+      }
+
       const tab =
         await getCurrentTab();
 
@@ -284,6 +358,11 @@ function App() {
       );
     };
 
+  /**
+   * =========================
+   * 이미 인덱싱된 질문 검색
+   * =========================
+   */
   const searchResults =
     useMemo(() => {
       const keyword =
@@ -302,12 +381,26 @@ function App() {
         (conversation) => {
           conversation.items.forEach(
             (item) => {
-              if (
+              const questionMatch =
                 item.text
                   .toLowerCase()
                   .includes(
                     keyword
-                  )
+                  );
+
+              /**
+               * 대화 제목도 검색
+               */
+              const conversationMatch =
+                conversation.title
+                  .toLowerCase()
+                  .includes(
+                    keyword
+                  );
+
+              if (
+                questionMatch ||
+                conversationMatch
               ) {
                 results.push({
                   conversation,
@@ -326,8 +419,63 @@ function App() {
     ]);
 
   /**
-   * 브라우저 기록에는 있지만
-   * Rewind에는 아직 저장되지 않은 대화
+   * =========================
+   * 아직 인덱싱되지 않은
+   * 과거 ChatGPT 대화 제목 검색
+   * =========================
+   */
+  const unindexedSearchResults =
+    useMemo(() => {
+      const keyword =
+        search
+          .trim()
+          .toLowerCase();
+
+      if (!keyword) {
+        return [];
+      }
+
+      const indexedIds =
+        new Set(
+          conversations.map(
+            (conversation) =>
+              conversation.id
+          )
+        );
+
+      return historyConversations.filter(
+        (conversation) => {
+          /**
+           * 이미 Rewind가 기억함
+           */
+          if (
+            indexedIds.has(
+              conversation.id
+            )
+          ) {
+            return false;
+          }
+
+          /**
+           * Chrome 방문기록의
+           * ChatGPT 대화 제목 검색
+           */
+          return conversation.title
+            .toLowerCase()
+            .includes(keyword);
+        }
+      );
+    }, [
+      conversations,
+      historyConversations,
+      search,
+    ]);
+
+  /**
+   * =========================
+   * 아직 인덱싱되지 않은
+   * 방문 기록 전체
+   * =========================
    */
   const unindexedConversations =
     useMemo(() => {
@@ -350,36 +498,47 @@ function App() {
       historyConversations,
     ]);
 
-  const totalQuestions =
-    useMemo(
-      () =>
-        conversations.reduce(
-          (
-            total,
-            conversation
-          ) =>
-            total +
-            conversation.items
-              .length,
-          0
-        ),
-      [conversations]
-    );
-
+  /**
+   * 현재 대화 제외
+   */
   const otherConversations =
-    useMemo(
-      () =>
-        conversations.filter(
-          (conversation) =>
-            conversation.id !==
-            currentConversation?.id
-        ),
-      [
-        conversations,
-        currentConversation,
-      ]
-    );
+    useMemo(() => {
+      return conversations.filter(
+        (conversation) =>
+          conversation.id !==
+          currentConversation?.id
+      );
+    }, [
+      conversations,
+      currentConversation,
+    ]);
 
+  /**
+   * 전체 질문 수
+   */
+  const totalQuestions =
+    useMemo(() => {
+      return conversations.reduce(
+        (
+          total,
+          conversation
+        ) =>
+          total +
+          conversation.items.length,
+        0
+      );
+    }, [conversations]);
+
+  /**
+   * 전체 검색 결과 수
+   */
+  const totalSearchResults =
+    searchResults.length +
+    unindexedSearchResults.length;
+
+  /**
+   * 날짜
+   */
   const formatDate = (
     timestamp: number
   ) => {
@@ -398,6 +557,11 @@ function App() {
     );
   };
 
+  /**
+   * =========================
+   * Loading
+   * =========================
+   */
   if (loading) {
     return (
       <main className="rewind">
@@ -410,6 +574,10 @@ function App() {
 
   return (
     <main className="rewind">
+      {/* =====================
+          HEADER
+         ===================== */}
+
       <header>
         <div className="logo">
           <span className="logo-icon">
@@ -417,7 +585,9 @@ function App() {
           </span>
 
           <div>
-            <h1>Rewind</h1>
+            <h1>
+              Rewind
+            </h1>
 
             <p>
               Find what you already
@@ -427,17 +597,25 @@ function App() {
         </div>
       </header>
 
+      {/* =====================
+          SEARCH
+         ===================== */}
+
       <input
         className="search"
         type="search"
         placeholder="Search your memory..."
         value={search}
-        onChange={(event) =>
+        onChange={(event) => {
           setSearch(
             event.target.value
-          )
-        }
+          );
+        }}
       />
+
+      {/* =====================
+          STATS
+         ===================== */}
 
       <div className="stats">
         <div className="stat">
@@ -463,6 +641,10 @@ function App() {
         </div>
       </div>
 
+      {/* =====================
+          검색 중
+         ===================== */}
+
       {search ? (
         <>
           <div className="section-heading">
@@ -472,70 +654,163 @@ function App() {
 
             <span>
               {
-                searchResults.length
+                totalSearchResults
               }
             </span>
           </div>
 
-          <section className="results">
-            {searchResults.map(
-              (result) => (
-                <button
-                  key={`${result.conversation.id}-${result.item.id}`}
-                  type="button"
-                  className="search-result"
-                  onClick={() => {
-                    if (
-                      result
-                        .conversation
-                        .id ===
-                      currentConversation
-                        ?.id
-                    ) {
-                      void jumpCurrent(
-                        result.item
-                          .id
-                      );
+          {/* =====================
+              INDEXED 검색 결과
+             ===================== */}
 
-                      return;
-                    }
-
-                    void openUrl(
-                      result
-                        .conversation
-                        .url
-                    );
-                  }}
-                >
-                  <span className="result-chat">
-                    {
-                      result
-                        .conversation
-                        .title
-                    }
-                  </span>
-
-                  <span className="result-text">
-                    {
-                      result.item
-                        .title
-                    }
-                  </span>
-                </button>
-              )
-            )}
-
-            {searchResults.length ===
-              0 && (
-              <div className="empty">
-                저장된 대화에서는
-                검색 결과가 없습니다.
+          {searchResults.length >
+            0 && (
+            <>
+              <div className="search-group-title">
+                ✓ INDEXED
               </div>
-            )}
-          </section>
+
+              <section className="results">
+                {searchResults.map(
+                  (
+                    result,
+                    index
+                  ) => (
+                    <button
+                      key={`${result.conversation.id}-${result.item.id}-${index}`}
+                      type="button"
+                      className="search-result"
+                      onClick={() => {
+                        /**
+                         * 현재 대화
+                         */
+                        if (
+                          result
+                            .conversation
+                            .id ===
+                          currentConversation
+                            ?.id
+                        ) {
+                          void jumpCurrent(
+                            result
+                              .item
+                              .id
+                          );
+
+                          return;
+                        }
+
+                        /**
+                         * 다른 대화
+                         */
+                        void openUrl(
+                          result
+                            .conversation
+                            .url
+                        );
+                      }}
+                    >
+                      <span className="result-chat">
+                        {
+                          result
+                            .conversation
+                            .title
+                        }
+                      </span>
+
+                      <span className="result-text">
+                        {
+                          result
+                            .item
+                            .title
+                        }
+                      </span>
+
+                      <span className="result-date">
+                        {formatDate(
+                          result
+                            .conversation
+                            .updatedAt
+                        )}
+                      </span>
+                    </button>
+                  )
+                )}
+              </section>
+            </>
+          )}
+
+          {/* =====================
+              NOT INDEXED 검색 결과
+             ===================== */}
+
+          {unindexedSearchResults.length >
+            0 && (
+            <>
+              <div className="search-group-title unindexed-title">
+                ○ NOT INDEXED YET
+              </div>
+
+              <section className="results">
+                {unindexedSearchResults.map(
+                  (
+                    conversation
+                  ) => (
+                    <button
+                      key={
+                        conversation.id
+                      }
+                      type="button"
+                      className="search-result unindexed-result"
+                      onClick={() => {
+                        void openUrl(
+                          conversation.url
+                        );
+                      }}
+                    >
+                      <span className="result-chat">
+                        과거 ChatGPT 대화
+                      </span>
+
+                      <span className="result-text">
+                        {
+                          conversation.title
+                        }
+                      </span>
+
+                      <span className="open-to-index">
+                        열어서 Rewind에
+                        기억시키기 →
+                      </span>
+
+                      <span className="result-date">
+                        {formatDate(
+                          conversation.lastVisitTime
+                        )}
+                      </span>
+                    </button>
+                  )
+                )}
+              </section>
+            </>
+          )}
+
+          {/* 검색 결과 없음 */}
+
+          {totalSearchResults ===
+            0 && (
+            <div className="empty">
+              검색 결과가
+              없습니다.
+            </div>
+          )}
         </>
       ) : (
         <>
+          {/* =====================
+              현재 대화
+             ===================== */}
+
           <div className="section-heading">
             <span>
               THIS CONVERSATION
@@ -543,7 +818,8 @@ function App() {
 
             <span>
               {currentConversation
-                ?.items.length ?? 0}
+                ?.items.length ??
+                0}
             </span>
           </div>
 
@@ -552,14 +828,16 @@ function App() {
               ?.items.map(
                 (item) => (
                   <button
-                    key={item.id}
+                    key={
+                      item.id
+                    }
                     type="button"
                     className="message"
-                    onClick={() =>
+                    onClick={() => {
                       void jumpCurrent(
                         item.id
-                      )
-                    }
+                      );
+                    }}
                   >
                     <span className="number">
                       {
@@ -575,7 +853,19 @@ function App() {
                   </button>
                 )
               )}
+
+            {!currentConversation
+              ?.items.length && (
+              <div className="empty">
+                아직 저장된 질문이
+                없습니다.
+              </div>
+            )}
           </section>
+
+          {/* =====================
+              INDEXED
+             ===================== */}
 
           <div className="section-heading indexed-heading">
             <span>
@@ -600,11 +890,11 @@ function App() {
                   }
                   type="button"
                   className="conversation-card"
-                  onClick={() =>
+                  onClick={() => {
                     void openUrl(
                       conversation.url
-                    )
-                  }
+                    );
+                  }}
                 >
                   <span className="memory-state">
                     ✓
@@ -635,7 +925,20 @@ function App() {
                 </button>
               )
             )}
+
+            {otherConversations.length ===
+              0 && (
+              <div className="empty">
+                아직 다른 대화를
+                기억하지 않았습니다.
+              </div>
+            )}
           </section>
+
+          {/* =====================
+              방문했지만 아직
+              인덱싱 안 된 대화
+             ===================== */}
 
           <div className="section-heading indexed-heading">
             <span>
@@ -662,11 +965,11 @@ function App() {
                     }
                     type="button"
                     className="conversation-card unindexed"
-                    onClick={() =>
+                    onClick={() => {
                       void openUrl(
                         conversation.url
-                      )
-                    }
+                      );
+                    }}
                   >
                     <span className="memory-state">
                       ○
@@ -696,8 +999,8 @@ function App() {
             {unindexedConversations.length ===
               0 && (
               <div className="empty">
-                최근 방문 기록에서
-                추가할 ChatGPT 대화가
+                추가로 인덱싱할
+                최근 ChatGPT 대화가
                 없습니다.
               </div>
             )}
