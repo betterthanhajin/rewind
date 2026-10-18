@@ -365,3 +365,12 @@ header {
   font-size: 12px;
   line-height: 1.6;
 }
+.notice {
+  padding: 10px 12px;
+  margin-bottom: 12px;
+  border-radius: 8px;
+  background: #fff3dc;
+  color: #725018;
+  font-size: 12px;
+  line-height: 1.5;
+}

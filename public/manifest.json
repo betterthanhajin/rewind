@@ -1,31 +1,27 @@
 {
   "manifest_version": 3,
   "name": "Rewind",
-  "version": "0.5.0",
+  "version": "0.5.2",
   "description": "Jump back to important moments in your ChatGPT conversations.",
   "permissions": [
-  "sidePanel",
-  "tabs",
-  "storage",
-  "history"
+    "sidePanel",
+    "tabs",
+    "storage",
+    "history"
   ],
   "host_permissions": [
     "https://chatgpt.com/*",
     "https://chat.openai.com/*"
   ],
-
   "background": {
     "service_worker": "background.js"
   },
-
   "action": {
     "default_title": "Open Rewind"
   },
-
   "side_panel": {
     "default_path": "index.html"
   },
-
   "content_scripts": [
     {
       "matches": [
